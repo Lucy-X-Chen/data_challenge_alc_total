@@ -4,9 +4,10 @@ __pycache__/
 *$py.class
 
 #result
-phase 2 model/Lucy/model/
-phase 2 model/Lucy/feature/
-phase 2 model/Lucy/result/
+phase_2_Lucy/model/
+phase_2_Lucy/feature/
+phase_2_Lucy/result/
+phase_2_Lucy/data/
 
 
 # C extensions
