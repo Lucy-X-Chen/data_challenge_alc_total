@@ -3,6 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+#result
+phase 2 model/Lucy/model/
+phase 2 model/Lucy/feature/
+phase 2 model/Lucy/result/
+
+
 # C extensions
 *.so
 

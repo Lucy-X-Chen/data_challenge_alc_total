@@ -39,10 +39,12 @@ def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=1000, tune
         model.best_iteration+1))
 
     if grid_search:
-        params = grid_search(model, X_train, y_train, params)
+        params = build_grid_search(model, X_train, y_train, params)
+        print('my new params are:', params)
 
     if tune_parameter:
-        params = tune_parameter(model, dtrain, num_boost_round, params)
+        params = tune_parameters(model, dtrain, num_boost_round, params)
+        print('my new params are:', params)
 
     cv_results = xgb.cv(
         params,
@@ -76,7 +78,7 @@ def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=1000, tune
    # for tuning parameters
 
 
-def tune_parameter(model, dtrain, num_boost_round, params):
+def tune_parameters(model, dtrain, num_boost_round, params):
     gridsearch_params = [
         (max_depth, min_child_weight)
         for max_depth in range(9, 14)
@@ -174,7 +176,7 @@ def tune_parameter(model, dtrain, num_boost_round, params):
     return params
 
 
-def grid_search(model, X_train, y_train, params):
+def build_grid_search(model, X_train, y_train, params):
     parameters_for_testing = {
         'learning_rate': [0.08, 0.07, 0.09],
         'max_depth': [3, 5],
