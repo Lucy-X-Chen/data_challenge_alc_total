@@ -163,7 +163,11 @@ prepared_df['year']=prepared_df['date'].dt.year
 
 # COMMAND ----------
 
-def train_model_per_farm(farm,df,features_list,predictions_column,predictions_df):
+
+
+# COMMAND ----------
+
+def train_model_per_farm(farm, training_year, testing_year, df,features_list,predictions_column,predictions_df, model_version:str, trained_model=None):
   
   params=  {'colsample_bytree': 0.6,
    'max_depth': 9,
@@ -174,14 +178,21 @@ def train_model_per_farm(farm,df,features_list,predictions_column,predictions_df
    'eta': 0.05}
   
   filtered_df=df[df['farm']==farm].set_index('date')
-  X_train=filtered_df.loc[:'2010',features_list] 
-  y_train=filtered_df.loc[:'2010','wp']
+  X_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),features_list]
+  y_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),'wp']
   xg_train = xgb.DMatrix(X_train, label=y_train)
-  model=xgb.train(params=params, dtrain=xg_train)
+  if trained_model is None:
+    model=xgb.train(params=params, dtrain=xg_train)
+    print('new model')
+  else:
+    model=xgb.train(params=params, dtrain=xg_train, xgb_model=trained_model)
+    print('use previous model')
   
-  X_pred=filtered_df.loc[:,features_list]
+  model.save_model(model_version+'_farm'+str(farm))
+  X_pred=filtered_df.loc[str(testing_year):,features_list]
   xg_pred=xgb.DMatrix(X_pred)
-  predictions_df.loc[df['farm']==farm,predictions_column]=model.predict(xg_pred)
+  mask=(predictions_df.date.dt.year>=testing_year) & (predictions_df['farm']==farm)
+  predictions_df.loc[mask,predictions_column]=model.predict(xg_pred)
 
 # COMMAND ----------
 
@@ -198,7 +209,7 @@ features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_a
 predictions_column='predictions_model1_farm'
 
 for farm in range(1,7):
-  train_model_per_farm(farm,prepared_df,features_list,predictions_column,predictions_df)
+  train_model_per_farm(farm, 2010, 2009, prepared_df, features_list,predictions_column,predictions_df, model_version='model1')
 
 # COMMAND ----------
 
@@ -210,7 +221,7 @@ features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
 predictions_column='predictions_model2_farm'
 
 for farm in range(1,7):
-  train_model_per_farm(farm,prepared_df,features_list,predictions_column,predictions_df)
+  train_model_per_farm(farm, 2010, 2009, prepared_df, features_list,predictions_column,predictions_df, model_version='model2')
 
 # COMMAND ----------
 
@@ -222,20 +233,39 @@ chunks = [distances[i:i+n] for i in range(0, len(distances), n)]
 
 def train_model_per_dist(dist:range,
                          df:pd.DataFrame,
+                         training_year,
+                         testing_year,
                          features_list:list,
                          predictions_column:str,
-                         predictions_df:pd.DataFrame):
+                         predictions_df:pd.DataFrame,
+                         model_version,
+                        trained_model=None):
   
-  mask=df['dist'].isin(dist)
+  params=  {'colsample_bytree': 0.6,
+ 'max_depth': 9,
+ 'min_child_weight': 5,
+ 'eval_metric': 'mae',
+ 'subsample': 0.6,
+ 'colsample': 1.0,
+ 'eta': 0.05}
+  
+  mask=(df['dist'].isin(dist))
   filtered_df=df.loc[mask].set_index('date')
-  X_train=filtered_df.loc[:'2010',features_list] 
-  y_train=filtered_df.loc[:'2010','wp']
-  xg_train = xgb.DMatrix(X_train, label=y_train)
-  model=xgb.train(params=params, dtrain=xg_train)
+  X_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),features_list] 
+  y_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),'wp']
   
-  X_pred=filtered_df.loc[:,features_list]
+  xg_train = xgb.DMatrix(X_train, label=y_train)
+  if trained_model is None:
+    model=xgb.train(params=params, dtrain=xg_train)
+    print('new model')
+  else:
+    model=xgb.train(params=params, dtrain=xg_train, xgb_model=trained_model)
+    
+  model.save_model(model_version+'_dist'+str(dist))
+  X_pred=filtered_df.loc[str(testing_year):,features_list]
   xg_pred=xgb.DMatrix(X_pred)
-  predictions_df.loc[mask,predictions_column]=model.predict(xg_pred)
+  mask_2=(predictions_df.date.dt.year>=testing_year) & mask
+  predictions_df.loc[mask_2,predictions_column]=model.predict(xg_pred)
 
 # COMMAND ----------
 
@@ -246,7 +276,7 @@ features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_a
 predictions_column='predictions_model1_dist'
 
 for dist in chunks:
-  train_model_per_dist(dist,prepared_df,features_list,predictions_column,predictions_df)
+  train_model_per_dist(dist, prepared_df, 2010, 2009, features_list,predictions_column,predictions_df, model_version='model1')
 
 # COMMAND ----------
 
@@ -257,26 +287,30 @@ features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
 predictions_column='predictions_model2_dist'
 
 for dist in chunks:
-  train_model_per_dist(dist,prepared_df,features_list,predictions_column,predictions_df)
+  train_model_per_dist(dist,prepared_df, 2010, 2009, features_list,predictions_column,predictions_df, model_version='model2')
 
 # COMMAND ----------
 
 #Overall models
 
+training_year = 2010
+testing_year = 2009
+
 # model 1
+
 features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
        'ws_angle_p3', 'ws_angle_n3','hour','month','year']
 
 predictions_column='predictions_model1_all'
 
-X_train=prepared_df.set_index('date').loc[:'2010',features_list] 
-y_train=prepared_df.set_index('date').loc[:'2010','wp']
+X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
+y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
 xg_train = xgb.DMatrix(X_train, label=y_train)
 model=xgb.train(params=params, dtrain=xg_train)
-
-X_pred=prepared_df.loc[:,features_list]
+model.save_model('model1_all')
+X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
 xg_pred=xgb.DMatrix(X_pred)
-predictions_df.loc[:,predictions_column]=model.predict(xg_pred)
+predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
 
 # model 2
 
@@ -285,14 +319,103 @@ features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
 
 predictions_column='predictions_model2_all'
 
-X_train=prepared_df.set_index('date').loc[:'2010',features_list] 
-y_train=prepared_df.set_index('date').loc[:'2010','wp']
+X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
+y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
 xg_train = xgb.DMatrix(X_train, label=y_train)
 model=xgb.train(params=params, dtrain=xg_train)
-
-X_pred=prepared_df.loc[:,features_list]
+model.save_model('model2_all')
+X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
 xg_pred=xgb.DMatrix(X_pred)
-predictions_df.loc[:,predictions_column]=model.predict(xg_pred)
+predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
+
+# COMMAND ----------
+
+# model 1 per farm
+
+import xgboost as xgb
+
+features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
+       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
+predictions_column='predictions_model1_farm'
+
+for farm in range(1,7):
+  trained_model='model1_farm'+str(farm)
+  train_model_per_farm(farm, 2011, 2011, prepared_df, features_list,predictions_column,predictions_df, model_version='model1', trained_model = trained_model)
+
+# COMMAND ----------
+
+# model 2 per farm
+
+features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
+       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
+
+predictions_column='predictions_model2_farm'
+
+for farm in range(1,7):
+  trained_model='model2_farm'+str(farm)
+  train_model_per_farm(farm, 2011, 2011, prepared_df, features_list,predictions_column,predictions_df, model_version='model2', trained_model=trained_model)
+
+# COMMAND ----------
+
+# model 1 per distance
+
+features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
+       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
+predictions_column='predictions_model1_dist'
+
+for dist in chunks:
+  trained_model='model1_dist'+str(dist)
+  train_model_per_dist(dist, prepared_df, 2011, 2011, features_list,predictions_column,predictions_df, model_version='model1', trained_model=trained_model)
+
+# COMMAND ----------
+
+# model 2 per distance
+
+features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
+       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
+predictions_column='predictions_model2_dist'
+
+for dist in chunks:
+  trained_model='model2_dist'+str(dist)
+  train_model_per_dist(dist,prepared_df, 2011, 2011, features_list,predictions_column,predictions_df, model_version= 'model2', trained_model=trained_model)
+
+# COMMAND ----------
+
+#Overall models
+
+training_year = 2011
+testing_year = 2011
+
+# model 1
+features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
+       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
+
+predictions_column='predictions_model1_all'
+
+X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
+y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
+xg_train = xgb.DMatrix(X_train, label=y_train)
+model=xgb.train(params=params, dtrain=xg_train, xgb_model='model1_all')
+
+X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
+xg_pred=xgb.DMatrix(X_pred)
+predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
+
+# model 2
+
+features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
+       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
+
+predictions_column='predictions_model2_all'
+
+X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
+y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
+xg_train = xgb.DMatrix(X_train, label=y_train)
+model=xgb.train(params=params, dtrain=xg_train, xgb_model='model2_all')
+
+X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
+xg_pred=xgb.DMatrix(X_pred)
+predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
 
 # COMMAND ----------
 
@@ -303,6 +426,10 @@ y_train=prepared_df.set_index('date').loc[:'2010','wp']
 lm.fit(X_train,y_train)
 X_pred=predictions_df.drop('date',axis=1)
 predictions_df['ensemble_predictions']=lm.predict(X_pred)
+
+# COMMAND ----------
+
+predictions_df[predictions_df.isna().any(axis=1)]
 
 # COMMAND ----------
 
