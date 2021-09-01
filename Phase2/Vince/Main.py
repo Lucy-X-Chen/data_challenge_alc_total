@@ -19,8 +19,6 @@ data.reset_index(inplace=True,drop=True)
 
 # Here we're doing some data augmentation setting each farm wp as an instance to train on
 
-import datetime as dt
-
 # pivot
 train_pivot=(data
  .melt(id_vars='date',var_name='farm',value_name='wp')
@@ -52,14 +50,6 @@ wind_forecasts_df['wd_cut']=pd.cut(wind_forecasts_df['wd'],8)
 
 # COMMAND ----------
 
-train_pivot
-
-# COMMAND ----------
-
-wind_forecasts_df
-
-# COMMAND ----------
-
 # Creation of a custom feature with a simple linear regression
 
 from sklearn.compose import ColumnTransformer
@@ -74,7 +64,7 @@ full_pipeline=ColumnTransformer([
   ('poly',PolynomialFeatures(degree=4,include_bias=False),['ws'])
 ])
 
-train_lr=ws_angle_df.set_index('date').loc[:'2010']
+train_lr=ws_angle_df.set_index('date').loc[:'2010'] #we will be able to do some incremental training here
 
 X_train=full_pipeline.fit_transform(train_lr)
 y_train=train_lr.wp
@@ -112,7 +102,7 @@ for farm in range(1,7):
   vect=ws_angle_df.loc[ws_angle_df['farm']==farm].set_index('date')['ws_angle']
   X_tot=np.split(vect,len(vect)/12) #checked that it is always the same size
 #   We can't use future data for training
-  X_train=[window for window in X_tot if window.index[11].year<=2010]
+  X_train=[window for window in X_tot if window.index[11].year<=2010] #incremental training
 #   training and predictions
   kmeans=KMeans(n_clusters=6)
   kmeans.fit(X_train)
@@ -136,7 +126,7 @@ for farm in range(1,7):
 
 # overall clustering
 vect=ws_angle_df.set_index('date')['ws_angle']
-X_tot=np.split(vect,len(vect)/12) #1 farm per window?
+X_tot=np.split(vect,len(vect)/12) #1 farm per window
 #   We can't use future data for training
 X_train=[window for window in X_tot if window.index[11].year<=2010]
 #   training and predictions
@@ -150,11 +140,8 @@ for i, cluster in enumerate(clusters):
 
 # COMMAND ----------
 
-clusters_df
-
-# COMMAND ----------
-
 # Join everything
+import datetime as dt
 
 prepared_df=pd.merge(ws_angle_df,clusters_df,how='left',left_on=['date','farm','dist'],right_on=['date','farm','dist'])
 
@@ -163,36 +150,25 @@ prepared_df['year']=prepared_df['date'].dt.year
 
 # COMMAND ----------
 
-
-
-# COMMAND ----------
-
-def train_model_per_farm(farm, training_year, testing_year, df,features_list,predictions_column,predictions_df, model_version:str, trained_model=None):
+def get_features_and_targets(
+                         df:pd.DataFrame,
+                         features_list:list,
+                         sample:bool,
+                         farm:int=None,
+                         dist:range=None) -> (pd.DataFrame, pd.DataFrame):
   
-  params=  {'colsample_bytree': 0.6,
-   'max_depth': 9,
-   'min_child_weight': 5,
-   'eval_metric': 'mae',
-   'subsample': 0.6,
-   'colsample': 1.0,
-   'eta': 0.05}
-  
-  filtered_df=df[df['farm']==farm].set_index('date')
-  X_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),features_list]
-  y_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),'wp']
-  xg_train = xgb.DMatrix(X_train, label=y_train)
-  if trained_model is None:
-    model=xgb.train(params=params, dtrain=xg_train)
-    print('new model')
+  if farm is not None:
+    filtered_df=df[df['farm']==farm]
+  elif dist is not None:
+    mask=df['dist'].isin(dist)
+    filtered_df=df.loc[mask]
   else:
-    model=xgb.train(params=params, dtrain=xg_train, xgb_model=trained_model)
-    print('use previous model')
+    filtered_df=df
+    
+  X_train=filtered_df.loc[sample,features_list] 
+  y_train=filtered_df.loc[sample,'wp']
   
-  model.save_model(model_version+'_farm'+str(farm))
-  X_pred=filtered_df.loc[str(testing_year):,features_list]
-  xg_pred=xgb.DMatrix(X_pred)
-  mask=(predictions_df.date.dt.year>=testing_year) & (predictions_df['farm']==farm)
-  predictions_df.loc[mask,predictions_column]=model.predict(xg_pred)
+  return (X_train, y_train)
 
 # COMMAND ----------
 
@@ -200,222 +176,339 @@ predictions_df=prepared_df[['date','farm','dist']].copy()
 
 # COMMAND ----------
 
-# model 1 per farm
-
 import xgboost as xgb
 
-features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
+def model_training(X_train, y_train, params, trained_model=None ):
+    xg_train = xgb.DMatrix(X_train, label=y_train)
+    if trained_model is None: #we don't use a pretrain model
+      model=xgb.train(params=params, dtrain=xg_train)
+    else:
+      model=xgb.train(params=params, dtrain=xg_train, xgb_model=trained_model)
+      print('use of a trained model')
+    return model
+
+def get_predictions(X_pred, model):
+    xg_pred=xgb.DMatrix(X_pred)
+    y_pred=model.predict(xg_pred)
+    return y_pred
+  
+def train_predict_and_save_model(train_df, features, training_sample, testing_sample, pred_df, model, params, **kwargs):
+  if 'farm' in kwargs.keys():
+    farm=kwargs['farm']
+    X_train, y_train = get_features_and_targets(train_df, features, training_sample, farm=farm ) 
+    X_pred, _ = get_features_and_targets(train_df, features, testing_sample, farm=farm )
+    predictions_mask=(pred_df['farm']==farm) & testing_sample
+#     model_name = model + '_farm_' + str(farm) #on ne distingue pas model1 et model2 --> pas besoin, ils sont écrasés quand on passe au modèle2
+    predictions_column='predictions_'+model+'_farm'
+    print(f"training on farm {farm}")
+  elif 'dist' in kwargs.keys():
+    dist=kwargs['dist']
+    X_train, y_train = get_features_and_targets(train_df, features, training_sample, dist=dist ) 
+    X_pred, _ = get_features_and_targets(train_df, features, testing_sample, dist=dist )
+    mask=pred_df['dist'].isin(dist)
+    predictions_mask=mask & testing_sample
+#     model_name= model + '_dist_' + str(dist)
+    predictions_column='predictions_'+model+'_dist'
+    print(f"training on dist {dist}")
+  else:
+    X_train, y_train = get_features_and_targets(train_df, features, training_sample ) 
+    X_pred, _ = get_features_and_targets(train_df, features, testing_sample )
+    predictions_mask=testing_sample
+#     model_name = model + '_all'
+    predictions_column = 'predictions_'+model+'_all'
+    print('overall training')
+  
+  if 'trained_model' in kwargs.keys():
+    trained_model=kwargs['trained_model']
+    model=model_training(X_train, y_train, params, trained_model=trained_model)
+  else:
+    model=model_training(X_train, y_train, params)
+    
+  y_pred = get_predictions(X_pred, model)
+  pred_df.loc[predictions_mask,predictions_column]=y_pred
+#   model.save_model(model_name)
+  
+def train_sample(df, window_start, window_end):
+  return ((df['date']>=window_start) & (df['date']<=window_end)) | ((df['date']>=BEGINNING_TRAIN_PERIOD) & (df['date']<=END_TRAIN_PERIOD))
+
+def write_sample(df, window_start, window_end):
+  return (df['date']>=window_start) & (df['date']<=window_end)
+
+def first_samples(df, window_size=47):
+  training_sample = train_sample(df, BEGINNING_TRAIN_PERIOD, END_TRAIN_PERIOD)
+  test_window_end = BEGINNING_TEST_PERIOD+dt.timedelta(hours=window_size)
+  testing_sample = write_sample(df, BEGINNING_TRAIN_PERIOD, test_window_end)
+  return training_sample, testing_sample
+
+def initialization(test_window_size=48, train_window_size=36):
+  test_window_start = BEGINNING_TEST_PERIOD+timedelta(hours=test_window_size+train_window_size)
+  train_window_start = BEGINNING_TEST_PERIOD+dt.timedelta(hours=test_window_size)
+  return train_window_start, test_window_start
+
+# COMMAND ----------
+
+features_1=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
        'ws_angle_p3', 'ws_angle_n3','hour','month','year']
-predictions_column='predictions_model1_farm'
+
+params=  {'colsample_bytree': 0.6,
+   'max_depth': 9,
+   'min_child_weight': 5,
+   'eval_metric': 'mae',
+   'subsample': 0.6,
+          
+#    'colsample': 1.0,
+   'eta': 0.05}
+  
+# first training until 2010
+
+BEGINNING_TEST_PERIOD=dt.datetime(2011,1,1,1)
+END_TRAIN_PERIOD=dt.datetime(2011,1,1,0)
+BEGINNING_TRAIN_PERIOD=dt.datetime(2009,7,1,1)
+END_TEST_PERIOD=dt.datetime(2012,6,23,1)
+
+training_sample, testing_sample = first_samples(prepared_df)
 
 for farm in range(1,7):
-  train_model_per_farm(farm, 2010, 2009, prepared_df, features_list,predictions_column,predictions_df, model_version='model1')
-
-# COMMAND ----------
-
-# model 2 per farm
-
-features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
-       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
-
-predictions_column='predictions_model2_farm'
-
-for farm in range(1,7):
-  train_model_per_farm(farm, 2010, 2009, prepared_df, features_list,predictions_column,predictions_df, model_version='model2')
-
-# COMMAND ----------
-
+  train_predict_and_save_model(train_df=prepared_df, features=features_1, training_sample=training_sample, testing_sample=testing_sample, pred_df=predictions_df, model='model1', params=params, farm=farm)
+  
 n = 3 # chunk length
 distances=range(1,49)
 chunks = [distances[i:i+n] for i in range(0, len(distances), n)]
 
+for dist in chunks:
+  train_predict_and_save_model(train_df=prepared_df, features=features_1, training_sample=training_sample, testing_sample=testing_sample, pred_df=predictions_df, model='model1', params=params, dist=dist)
+
+train_predict_and_save_model(train_df=prepared_df, features=features_1, training_sample=training_sample, testing_sample=testing_sample, pred_df=predictions_df,  model='model1', params=params)
+
 # COMMAND ----------
 
-def train_model_per_dist(dist:range,
-                         df:pd.DataFrame,
-                         training_year,
-                         testing_year,
-                         features_list:list,
-                         predictions_column:str,
-                         predictions_df:pd.DataFrame,
-                         model_version,
-                        trained_model=None):
+#incremental training
+
+# per farm
+
+params=  {
+  'colsample_bytree': 0.6,
+  'max_depth': 9,
+  'min_child_weight': 5,
+  'eval_metric': 'mae',
+  'subsample': 0.6,
+#   'updater':'refresh',
+#   'process_type': 'update',
+#   'refresh_leaf': True,
+#   'silent': False,
+#    'colsample': 1.0,
+   'eta': 0.05}
+
+
+for farm in range(1,7):
   
-  params=  {'colsample_bytree': 0.6,
- 'max_depth': 9,
- 'min_child_weight': 5,
- 'eval_metric': 'mae',
- 'subsample': 0.6,
- 'colsample': 1.0,
- 'eta': 0.05}
-  
-  mask=(df['dist'].isin(dist))
-  filtered_df=df.loc[mask].set_index('date')
-  X_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),features_list] 
-  y_train=filtered_df.dropna().loc[str(training_year-1):str(training_year),'wp']
-  
-  xg_train = xgb.DMatrix(X_train, label=y_train)
-  if trained_model is None:
-    model=xgb.train(params=params, dtrain=xg_train)
-    print('new model')
-  else:
-    model=xgb.train(params=params, dtrain=xg_train, xgb_model=trained_model)
+  train_window_start, test_window_start = initialization()
+
+  while test_window_start<=END_TEST_PERIOD:
     
-  model.save_model(model_version+'_dist'+str(dist))
-  X_pred=filtered_df.loc[str(testing_year):,features_list]
-  xg_pred=xgb.DMatrix(X_pred)
-  mask_2=(predictions_df.date.dt.year>=testing_year) & mask
-  predictions_df.loc[mask_2,predictions_column]=model.predict(xg_pred)
+    test_window_end = test_window_start+dt.timedelta(hours=47)
+    train_window_end = train_window_start+dt.timedelta(hours=35)
+    
+    training_sample = train_sample(prepared_df, train_window_start, train_window_end)
+    testing_sample = write_sample(prepared_df, train_window_start, test_window_end)
+    
+#     print(f" training from {train_window_start} and {train_window_end}")
+#     print(f" writing from {train_window_start} and {test_window_end}")
+#     print("-------------------------------------------------------------")
+    
+#     trained_model='model1_farm_' + str(farm)
+
+    train_predict_and_save_model(train_df=prepared_df, 
+                                 features=features_1, 
+                                 training_sample=training_sample, 
+                                 testing_sample=testing_sample, 
+                                 pred_df=predictions_df,  
+                                 model='model1', 
+                                 params=params, farm=farm 
+#                                  trained_model=trained_model
+                                )
+
+    test_window_start=test_window_end+dt.timedelta(hours=37)
+    train_window_start=train_window_end+dt.timedelta(hours=49)
+    
 
 # COMMAND ----------
 
-# model 1 per distance
-
-features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
-       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
-predictions_column='predictions_model1_dist'
+# per dist
 
 for dist in chunks:
-  train_model_per_dist(dist, prepared_df, 2010, 2009, features_list,predictions_column,predictions_df, model_version='model1')
+  
+  train_window_start, test_window_start = initialization()
+
+  while test_window_start<=END_TEST_PERIOD:
+    
+    test_window_end=test_window_start+dt.timedelta(hours=47)
+    train_window_end=train_window_start+dt.timedelta(hours=35)
+    
+    training_sample = train_sample(prepared_df, train_window_start, train_window_end)
+    testing_sample = write_sample(prepared_df, train_window_start, test_window_end)
+#     trained_model='model1_dist_' + str(dist)
+    train_predict_and_save_model(train_df=prepared_df,
+                                 features=features_1,
+                                 training_sample=training_sample,
+                                 testing_sample=testing_sample,
+                                 pred_df=predictions_df, 
+                                 model='model1', params=params, 
+                                 dist=dist
+#                                  ,trained_model= trained_model
+                                )
+
+    test_window_start=test_window_end+dt.timedelta(hours=37)
+    train_window_start=train_window_end+dt.timedelta(hours=49)
+
+# overall
+
+train_window_start, test_window_start = initialization()
+  
+while test_window_start<=END_TEST_PERIOD:
+  
+  test_window_end=test_window_start+dt.timedelta(hours=47)
+  train_window_end=train_window_start+dt.timedelta(hours=35)
+  training_sample = train_sample(prepared_df, train_window_start, train_window_end)
+  testing_sample = write_sample(prepared_df, train_window_start, test_window_end)
+#   trained_model = 'model1_all'
+  train_predict_and_save_model(train_df=prepared_df,
+                               features=features_1, 
+                               training_sample=training_sample, 
+                               testing_sample=testing_sample, 
+                               pred_df=predictions_df, 
+                               model='model1', 
+                               params=params 
+#                                trained_model=trained_model
+                              )
+
+  test_window_start=test_window_end+dt.timedelta(hours=37)
+  train_window_start=train_window_end+dt.timedelta(hours=49)
 
 # COMMAND ----------
 
-# model 2 per distance
-
-features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
+features_2=['farm','dist','ws_angle_p1', 'ws_angle_p2',
        'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
-predictions_column='predictions_model2_dist'
 
-for dist in chunks:
-  train_model_per_dist(dist,prepared_df, 2010, 2009, features_list,predictions_column,predictions_df, model_version='model2')
+params=  {'colsample_bytree': 0.6,
+   'max_depth': 9,
+   'min_child_weight': 5,
+   'eval_metric': 'mae',
+   'subsample': 0.6,
+#    'colsample': 1.0,
+   'eta': 0.05}
+  
+# first training until 2010
 
-# COMMAND ----------
-
-#Overall models
-
-training_year = 2010
-testing_year = 2009
-
-# model 1
-
-features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
-       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
-
-predictions_column='predictions_model1_all'
-
-X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
-y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
-xg_train = xgb.DMatrix(X_train, label=y_train)
-model=xgb.train(params=params, dtrain=xg_train)
-model.save_model('model1_all')
-X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
-xg_pred=xgb.DMatrix(X_pred)
-predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
-
-# model 2
-
-features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
-       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
-
-predictions_column='predictions_model2_all'
-
-X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
-y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
-xg_train = xgb.DMatrix(X_train, label=y_train)
-model=xgb.train(params=params, dtrain=xg_train)
-model.save_model('model2_all')
-X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
-xg_pred=xgb.DMatrix(X_pred)
-predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
-
-# COMMAND ----------
-
-# model 1 per farm
-
-import xgboost as xgb
-
-features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
-       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
-predictions_column='predictions_model1_farm'
+training_sample, testing_sample = first_samples(prepared_df)
 
 for farm in range(1,7):
-  trained_model='model1_farm'+str(farm)
-  train_model_per_farm(farm, 2011, 2011, prepared_df, features_list,predictions_column,predictions_df, model_version='model1', trained_model = trained_model)
+  train_predict_and_save_model(train_df=prepared_df, features=features_2, training_sample=training_sample, testing_sample=testing_sample, pred_df=predictions_df, model='model2', params=params, farm=farm)
+  
+n = 3 # chunk length
+distances=range(1,49)
+chunks = [distances[i:i+n] for i in range(0, len(distances), n)]
+
+for dist in chunks:
+  train_predict_and_save_model(train_df=prepared_df, features=features_2, training_sample=training_sample, testing_sample=testing_sample, pred_df=predictions_df, model='model2', params=params, dist=dist)
+
+train_predict_and_save_model(train_df=prepared_df, features=features_2, training_sample=training_sample, testing_sample=testing_sample, pred_df=predictions_df,  model='model2', params=params)
 
 # COMMAND ----------
 
-# model 2 per farm
+#incremental training
 
-features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
-       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
+# params=  {
+#   'colsample_bytree': 0.6,
+#   'max_depth': 9,
+#   'min_child_weight': 5,
+#   'eval_metric': 'mae',
+#   'subsample': 0.6,
+#   'updater':'refresh',
+#   'process_type': 'update',
+#   'refresh_leaf': True,
+#   'silent': False,
+# #    'colsample': 1.0,
+#    'eta': 0.05}
 
-predictions_column='predictions_model2_farm'
-
+# per farm
 for farm in range(1,7):
-  trained_model='model2_farm'+str(farm)
-  train_model_per_farm(farm, 2011, 2011, prepared_df, features_list,predictions_column,predictions_df, model_version='model2', trained_model=trained_model)
+  
+  train_window_start, test_window_start = initialization()
 
-# COMMAND ----------
+  while test_window_start<=END_TEST_PERIOD:
+    
+    test_window_end = test_window_start+dt.timedelta(hours=47)
+    train_window_end = train_window_start+dt.timedelta(hours=35)
+    
+    training_sample = train_sample(prepared_df, train_window_start, train_window_end)
+    testing_sample = write_sample(prepared_df, train_window_start, test_window_end)
+#     trained_model='model2_farm_' + str(farm)
+    train_predict_and_save_model(train_df=prepared_df, 
+                                 features=features_2, 
+                                 training_sample=training_sample, 
+                                 testing_sample=testing_sample, 
+                                 pred_df=predictions_df,  
+                                 model='model2', 
+                                 params=params, farm=farm
+#                                  , trained_model=trained_model
+                                )
 
-# model 1 per distance
+    test_window_start=test_window_end+dt.timedelta(hours=37)
+    train_window_start=train_window_end+dt.timedelta(hours=49)
 
-features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
-       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
-predictions_column='predictions_model1_dist'
-
+# per dist
 for dist in chunks:
-  trained_model='model1_dist'+str(dist)
-  train_model_per_dist(dist, prepared_df, 2011, 2011, features_list,predictions_column,predictions_df, model_version='model1', trained_model=trained_model)
+  
+  train_window_start, test_window_start = initialization()
+
+  while test_window_start<=END_TEST_PERIOD:
+    
+    test_window_end=test_window_start+dt.timedelta(hours=47)
+    train_window_end=train_window_start+dt.timedelta(hours=35)
+    
+    training_sample = train_sample(prepared_df, train_window_start, train_window_end)
+    testing_sample = write_sample(prepared_df, train_window_start, test_window_end)
+#     trained_model='model2_dist_' + str(dist)
+    train_predict_and_save_model(train_df=prepared_df,
+                                 features=features_2,
+                                 training_sample=training_sample,
+                                 testing_sample=testing_sample,
+                                 pred_df=predictions_df, 
+                                 model='model2', params=params, 
+                                 dist=dist
+#                                  , trained_model= trained_model
+                                )
+
+    test_window_start=test_window_end+dt.timedelta(hours=37)
+    train_window_start=train_window_end+dt.timedelta(hours=49)
+
+train_window_start, test_window_start = initialization()
+
+# overall
+while test_window_start<=END_TEST_PERIOD:
+  
+  test_window_end=test_window_start+dt.timedelta(hours=47)
+  train_window_end=train_window_start+dt.timedelta(hours=35)
+  training_sample = train_sample(prepared_df, train_window_start, train_window_end)
+  testing_sample = write_sample(prepared_df, train_window_start, test_window_end)
+#   trained_model='model2_all'
+  train_predict_and_save_model(train_df=prepared_df,
+                               features=features_2, 
+                               training_sample=training_sample, 
+                               testing_sample=testing_sample, 
+                               pred_df=predictions_df, 
+                               model='model2', 
+                               params=params 
+#                                trained_model=trained_model
+                              )
+
+  test_window_start=test_window_end+dt.timedelta(hours=37)
+  train_window_start=train_window_end+dt.timedelta(hours=49)
 
 # COMMAND ----------
 
-# model 2 per distance
-
-features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
-       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
-predictions_column='predictions_model2_dist'
-
-for dist in chunks:
-  trained_model='model2_dist'+str(dist)
-  train_model_per_dist(dist,prepared_df, 2011, 2011, features_list,predictions_column,predictions_df, model_version= 'model2', trained_model=trained_model)
-
-# COMMAND ----------
-
-#Overall models
-
-training_year = 2011
-testing_year = 2011
-
-# model 1
-features_list=['ws','farm','dist','ws_angle','ws_angle_p1', 'ws_angle_n1', 'ws_angle_p2', 'ws_angle_n2',
-       'ws_angle_p3', 'ws_angle_n3','hour','month','year']
-
-predictions_column='predictions_model1_all'
-
-X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
-y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
-xg_train = xgb.DMatrix(X_train, label=y_train)
-model=xgb.train(params=params, dtrain=xg_train, xgb_model='model1_all')
-
-X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
-xg_pred=xgb.DMatrix(X_pred)
-predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
-
-# model 2
-
-features_list=['farm','dist','ws_angle_p1', 'ws_angle_p2',
-       'ws_angle_p3','hour','month','farm_cluster','general_cluster','window_start','window_instance_pos']
-
-predictions_column='predictions_model2_all'
-
-X_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),features_list] 
-y_train=prepared_df.set_index('date').loc[str(training_year-1):str(training_year),'wp']
-xg_train = xgb.DMatrix(X_train, label=y_train)
-model=xgb.train(params=params, dtrain=xg_train, xgb_model='model2_all')
-
-X_pred=prepared_df.loc[prepared_df.date.dt.year>=testing_year,features_list]
-xg_pred=xgb.DMatrix(X_pred)
-predictions_df.loc[prepared_df.date.dt.year>=testing_year,predictions_column]=model.predict(xg_pred)
+predictions_df
 
 # COMMAND ----------
 
@@ -426,10 +519,6 @@ y_train=prepared_df.set_index('date').loc[:'2010','wp']
 lm.fit(X_train,y_train)
 X_pred=predictions_df.drop('date',axis=1)
 predictions_df['ensemble_predictions']=lm.predict(X_pred)
-
-# COMMAND ----------
-
-predictions_df[predictions_df.isna().any(axis=1)]
 
 # COMMAND ----------
 
@@ -461,6 +550,10 @@ test_dates=(data[mask]['date']).astype(str)
 # COMMAND ----------
 
 submission=predictions[predictions['date'].isin(test_dates)]
+
+# COMMAND ----------
+
+submission
 
 # COMMAND ----------
 
