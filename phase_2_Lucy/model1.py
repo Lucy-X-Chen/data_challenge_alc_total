@@ -14,7 +14,7 @@ from sklearn.model_selection import RandomizedSearchCV, GridSearchCV, train_test
 plt.style.use('fivethirtyeight')
 
 
-def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=1000, tune_parameter=False, grid_search=False, graph=True):
+def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=10, tune_parameter=False, grid_search=False, graph=True):
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dtest = xgb.DMatrix(X_test, label=y_test)
 
@@ -31,7 +31,7 @@ def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=1000, tune
         dtrain,
         num_boost_round=num_boost_round,
         evals=[(dtest, "Test")],
-        early_stopping_rounds=10,
+        early_stopping_rounds=1000,
     )
 
     print("Best MAE: {:.5f} with {} rounds".format(
@@ -74,15 +74,17 @@ def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=1000, tune
         plt.rcParams['figure.figsize'] = [40, 40]
         plt.show()
 
-    return best_model
+    parameters = best_model.save_config()
+
+    return best_model, parameters
    # for tuning parameters
 
 
 def tune_parameters(model, dtrain, num_boost_round, params):
     gridsearch_params = [
         (max_depth, min_child_weight)
-        for max_depth in range(9, 14)
-        for min_child_weight in range(5, 10)
+        for max_depth in range(11, 15)
+        for min_child_weight in range(8, 11)
     ]
 
     min_mae = float("Inf")
@@ -118,8 +120,8 @@ def tune_parameters(model, dtrain, num_boost_round, params):
 
     gridsearch_params = [
         (subsample, colsample)
-        for subsample in [i/10. for i in range(6, 11)]
-        for colsample in [i/10. for i in range(6, 11)]
+        for subsample in [i/10. for i in range(4, 8)]
+        for colsample in [i/10. for i in range(8, 12)]
     ]
 
     min_mae = float("Inf")
@@ -156,7 +158,7 @@ def tune_parameters(model, dtrain, num_boost_round, params):
 
     min_mae = float("Inf")
     best_params = None
-    for eta in [.5, .3, .1, 0.05, 0.01]:  # alias: learning_rate
+    for eta in [.1, 0.05, 0.01]:  # alias: learning_rate
         print("CV with eta={}".format(eta))
         # We update our parameters
         params['eta'] = eta

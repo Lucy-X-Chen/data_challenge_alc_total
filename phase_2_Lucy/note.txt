@@ -1,0 +1,10 @@
+with clustering -- u,v,ws,wd into 4 clusters
+
+and monthly training
+
+and features including % and difference
+
+
+reaching score Score Score 0,111715
+
+using training all data 0,103582
