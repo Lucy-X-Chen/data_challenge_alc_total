@@ -8,3 +8,14 @@ and features including % and difference
 reaching score Score Score 0,111715
 
 using training all data 0,103582
+
+
+It does prove to be useful:
+
+training wp1 - wp6 merged --> 1 model
+
+looping incrementally score0,110132
+
+without looping incrementall (score as 2010 Dec 31) score 0,114233
+
+training till all data available : 0,104022

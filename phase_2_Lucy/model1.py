@@ -101,7 +101,7 @@ def tune_parameters(model, dtrain, num_boost_round, params):
             params,
             dtrain,
             num_boost_round=num_boost_round,
-            seed=42,
+            seed=77,
             nfold=5,
             metrics={'mae'},
             early_stopping_rounds=10
@@ -120,8 +120,8 @@ def tune_parameters(model, dtrain, num_boost_round, params):
 
     gridsearch_params = [
         (subsample, colsample)
-        for subsample in [i/10. for i in range(4, 8)]
-        for colsample in [i/10. for i in range(8, 12)]
+        for subsample in [i/10. for i in range(6, 10)]
+        for colsample in [i/10. for i in range(8, 10)]
     ]
 
     min_mae = float("Inf")
