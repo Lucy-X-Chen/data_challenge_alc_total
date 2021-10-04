@@ -1,5 +1,6 @@
 # XGBOOST
 import pandas as pd
+import time
 import datetime
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,33 +13,36 @@ from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import RepeatedKFold
 from sklearn.model_selection import RandomizedSearchCV, GridSearchCV, train_test_split
 plt.style.use('fivethirtyeight')
-from numba import jit, cuda
-xgb.set_config(verbosity=0)
 
-@jit
+
 def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=10, tune_parameter=False, grid_search=False, graph=True):
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dtest = xgb.DMatrix(X_test, label=y_test)
 
     # "Learn" the mean from the training data
-    # mean_train = np.mean(y_train)
-    # # Get predictions on the test set
-    # baseline_predictions = np.ones(y_test.shape) * mean_train
-    # # Compute MAE
-    # mae_baseline = mean_absolute_error(y_test, baseline_predictions)
-    #print("Baseline MAE is {:.2f}".format(mae_baseline))
+    mean_train = np.mean(y_train)
+    # Get predictions on the test set
+    baseline_predictions = np.ones(y_test.shape) * mean_train
+    # Compute MAE
+    mae_baseline = mean_absolute_error(y_test, baseline_predictions)
+    print("Baseline MAE is {:.2f}".format(mae_baseline))
+    
+    tmp = time.time()
+    gpu_res = {}
 
     model = xgb.train(
         params,
         dtrain,
         num_boost_round=num_boost_round,
         evals=[(dtest, "Test")],
-        early_stopping_rounds=1000,
+        evals_result=gpu_res
     )
+    gpu_time = time.time() - tmp
+    print("GPU Training Time: %s seconds" % (str(gpu_time)))
 
-    print("Best MAE: {:.5f} with {} rounds".format(
-        model.best_score,
-        model.best_iteration+1))
+    # print("Best MAE: {:.5f} with {} rounds".format(
+    #     model.best_score,
+    #     model.best_iteration+1))
 
     if grid_search:
         params = build_grid_search(model, X_train, y_train, params)
@@ -67,37 +71,26 @@ def run_xgb(X_train, X_test, y_train, y_test, params, num_boost_round=10, tune_p
         num_boost_round=num_boost_round,
         evals=[(dtest, "Test")])
 
-    print("Best MAE: {:.5f} in {} rounds".format(
-        model.best_score, model.best_iteration+1))
+    # print("Best MAE: {:.5f} in {} rounds".format(
+    #     model.best_score, model.best_iteration+1))
     print("MAE for best modeL: ", mean_absolute_error(
         best_model.predict(dtest), y_test))
     if graph:
         xgb.plot_importance(best_model)
-        #plt.rcParams['figure.figsize'] = [120, 120]
+        #plt.rcParams['figure.figsize'] = [40, 40]
         plt.show()
-    
-    feat_imp = (
-            pd.DataFrame(
-                best_model.get_score(importance_type="gain"),
-                index=["feature_importance"],
-            )
-            .transpose()
-            .sort_values(by=["feature_importance"], ascending=False)
-        )
-
-	
 
     parameters = best_model.save_config()
 
-    return best_model, parameters, feat_imp
+    return best_model, parameters
    # for tuning parameters
 
 
 def tune_parameters(model, dtrain, num_boost_round, params):
     gridsearch_params = [
         (max_depth, min_child_weight)
-        for max_depth in range(4, 15)
-        for min_child_weight in range(8, 10)
+        for max_depth in range(11, 15)
+        for min_child_weight in range(8, 11)
     ]
 
     min_mae = float("Inf")
@@ -133,7 +126,7 @@ def tune_parameters(model, dtrain, num_boost_round, params):
 
     gridsearch_params = [
         (subsample, colsample)
-        for subsample in [i/10. for i in range(8, 10)]
+        for subsample in [i/10. for i in range(6, 10)]
         for colsample in [i/10. for i in range(8, 10)]
     ]
 
